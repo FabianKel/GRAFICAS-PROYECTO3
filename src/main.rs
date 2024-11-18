@@ -1,8 +1,10 @@
 use minifb::{Key, Window, WindowOptions};
-use nalgebra_glm::{Vec3, Mat4, look_at, perspective};
+use nalgebra_glm::{Vec3, Mat4, look_at, perspective, rotate_y};
+use utils::frustum_culling;
 use std::time::{Duration, Instant};
 use std::f32::consts::PI;
 
+mod utils;
 mod framebuffer;
 mod triangle;
 mod vertex;
@@ -26,12 +28,12 @@ use shaders::{ring_shader, rocky_planet_shader, gas_giant_shader, gas_giant_shad
 use fastnoise_lite::{FastNoiseLite, NoiseType};
 
 pub struct Uniforms {
-    model_matrix: Mat4,
-    view_matrix: Mat4,
-    projection_matrix: Mat4,
-    viewport_matrix: Mat4,
-    time: f32,
-    noise: FastNoiseLite,
+    pub model_matrix: Mat4,
+    pub view_matrix: Mat4,
+    pub projection_matrix: Mat4,
+    pub viewport_matrix: Mat4,
+    pub time: f32,
+    pub noise: FastNoiseLite,
 }
 
 struct Planet {
@@ -49,42 +51,10 @@ fn create_noise() -> FastNoiseLite {
     noise
 }
 
-fn create_model_matrix(translation: Vec3, scale: f32, rotation: Vec3) -> Mat4 {
-    // Matrices de rotación y transformación combinadas.
-    let (sin_x, cos_x) = rotation.x.sin_cos();
-    let (sin_y, cos_y) = rotation.y.sin_cos();
-    let (sin_z, cos_z) = rotation.z.sin_cos();
-    
-
-    let rotation_matrix_x = Mat4::new(
-        1.0,  0.0,    0.0,   0.0,
-        0.0,  cos_x, -sin_x, 0.0,
-        0.0,  sin_x,  cos_x, 0.0,
-        0.0,  0.0,    0.0,   1.0,
-    );
-    
-    let rotation_matrix_y = Mat4::new(
-        cos_y,  0.0,  sin_y, 0.0,
-        0.0,    1.0,  0.0,   0.0,
-        -sin_y, 0.0,  cos_y, 0.0,
-        0.0,    0.0,  0.0,   1.0,
-    );
-    
-    let rotation_matrix_z = Mat4::new(
-        cos_z, -sin_z, 0.0, 0.0,
-        sin_z,  cos_z, 0.0, 0.0,
-        0.0,    0.0,  1.0, 0.0,
-        0.0,    0.0,  0.0, 1.0,
-    );
-
-    let rotation_matrix = rotation_matrix_z * rotation_matrix_y * rotation_matrix_x;
-    let transform_matrix = Mat4::new(
-        scale, 0.0,   0.0,   translation.x,
-        0.0,   scale, 0.0,   translation.y,
-        0.0,   0.0,   scale, translation.z,
-        0.0,   0.0,   0.0,   1.0,
-    );
-    transform_matrix * rotation_matrix
+fn create_model_matrix(translation: Vec3, scale: f32, rotation_angle: f32) -> Mat4 {
+    Mat4::new_translation(&translation)
+        * Mat4::from_axis_angle(&Vec3::y_axis(), rotation_angle)
+        * Mat4::new_scaling(scale)
 }
 
 fn create_view_matrix(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
@@ -106,6 +76,9 @@ fn create_viewport_matrix(width: f32, height: f32) -> Mat4 {
     )
 }
 
+
+
+
 fn main() {
     let window_width = 800;
     let window_height = 600;
@@ -115,7 +88,7 @@ fn main() {
     let start_time = Instant::now();
 
     let mut framebuffer = Framebuffer::new(framebuffer_width, framebuffer_height);
-    let mut window = Window::new("Laboratorio 4 - GPC", window_width, window_height, WindowOptions::default())
+    let mut window = Window::new("Proyecto 3 - GPC", window_width, window_height, WindowOptions::default())
         .unwrap();
 
     window.set_position(500, 500);
@@ -202,13 +175,20 @@ fn main() {
 ];
 
 
-    let mut spaceship = Spaceship::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0));
+    let spaceship_obj = Obj::load("assets/models/mini_espacioship.obj").expect("Error al cargar el modelo de la nave espacial");
+
+    let mut spaceship = Spaceship::new(
+        Vec3::new(14.0, 0.0, 18.0), // Posición inicial
+        Vec3::new(0.0, 0.0, 0.0), // Rotación inicial
+        1.0,                      // Escala
+        spaceship_obj.get_vertex_array(), 
+        desert_planet_shader,
+    );
     let mut camera = Camera::new(
-        Vec3::new(0.0, 10.0, -20.0),
-        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 10.0, 20.0),
+        Vec3::new(0.0, 10.0, 0.0),
         Vec3::new(0.0, 1.0, 0.0),
     );
-
 
     
 
@@ -217,18 +197,32 @@ fn main() {
         if window.is_key_down(Key::Escape) {
             break;
         }
-
-        handle_input(&window, &mut camera, &mut spaceship);
+    
+        handle_input(&window, &mut spaceship, &mut camera);
+        update_camera(&mut camera, &spaceship);
+    
         framebuffer.clear();
-
+    
         let time_elapsed = start_time.elapsed().as_secs_f32();
         let view_matrix = create_view_matrix(camera.eye, camera.center, camera.up);
-        let projection_matrix = create_perspective_matrix(window_width as f32, window_height as f32);
+        let projection_matrix = create_perspective_matrix(window_width as f32 *0.5, window_height as f32 *0.5);
         let viewport_matrix = create_viewport_matrix(framebuffer_width as f32, framebuffer_height as f32);
-
+    
         for planet in &planets {
-            let model_matrix = create_model_matrix(planet.position, planet.scale, planet.rotation);
-        
+            // **Aplicar frustum culling**: verificar si el planeta está dentro del frustum
+            if !frustum_culling(
+                &planet.position,
+                planet.scale,
+                &view_matrix,
+                &projection_matrix,
+            ) {
+                continue; // Saltar este planeta si está fuera del frustum
+            }
+    
+            // Calcular matriz de modelo del planeta
+            let model_matrix = create_model_matrix(planet.position, planet.scale, time_elapsed);
+    
+            // Las matrices de vista, proyección y viewport son constantes para todos los planetas
             let uniforms = Uniforms {
                 model_matrix,
                 view_matrix,
@@ -237,21 +231,26 @@ fn main() {
                 time: time_elapsed,
                 noise: create_noise(),
             };
-        
+    
+            // Transformar los vértices del planeta en función de sus propias matrices
             let transformed_vertices = planet.vertices.iter()
                 .map(|vertex| vertex_shader(vertex, &uniforms))
                 .collect::<Vec<_>>();
-        
+    
+            // Dividir en triángulos
             let triangles = transformed_vertices.chunks(3)
                 .filter(|tri| tri.len() == 3)
                 .map(|tri| [tri[0].clone(), tri[1].clone(), tri[2].clone()])
                 .collect::<Vec<_>>();
-        
+    
             let mut fragments = Vec::new();
+    
+            // Generar fragmentos para rasterizar
             for tri in &triangles {
                 fragments.extend(triangle(&tri[0], &tri[1], &tri[2]));
             }
-        
+    
+            // Dibujar los fragmentos en el framebuffer
             for fragment in fragments {
                 let (x, y) = (fragment.position.x as usize, fragment.position.y as usize);
                 if x < framebuffer.width && y < framebuffer.height {
@@ -261,27 +260,91 @@ fn main() {
                 }
             }
         }
+    
+        
+        let model_matrix = create_model_matrix(spaceship.position, spaceship.scale, spaceship.rotation.y);
+    
+        let uniforms = Uniforms {
+            model_matrix,
+            view_matrix,
+            projection_matrix,
+            viewport_matrix,
+            time: time_elapsed,
+            noise: create_noise(),
+        };
+    
+        let transformed_vertices = spaceship.vertices.iter()
+            .map(|vertex| vertex_shader(vertex, &uniforms))
+            .collect::<Vec<_>>();
+    
+        let triangles = transformed_vertices.chunks(3)
+            .filter(|tri| tri.len() == 3)
+            .map(|tri| [tri[0].clone(), tri[1].clone(), tri[2].clone()])
+            .collect::<Vec<_>>();
+    
+        let mut fragments = Vec::new();
+        for tri in &triangles {
+            fragments.extend(triangle(&tri[0], &tri[1], &tri[2]));
+        }
+    
+        for fragment in fragments {
+            let (x, y) = (fragment.position.x as usize, fragment.position.y as usize);
+            if x < framebuffer.width && y < framebuffer.height {
+                let shaded_color = (spaceship.shader)(&fragment, &uniforms);
+                framebuffer.set_current_color(shaded_color.to_hex());
+                framebuffer.point(x, y, fragment.depth);
+            }
+        }
+    
         window.update_with_buffer(&framebuffer.buffer, framebuffer_width, framebuffer_height).unwrap();
         std::thread::sleep(frame_delay);
     }
+    
 }
 
-fn handle_input(window: &Window, camera: &mut Camera, spaceship: &mut Spaceship) {
-    let movement_speed = 1.0;
 
-    if window.is_key_down(Key::W) {
-        spaceship.move_forward();
-    }
-    if window.is_key_down(Key::S) {
-        spaceship.move_backward();
-    }
+fn handle_input(window: &Window, spaceship: &mut Spaceship, camera: &mut Camera) {
+    let movement_speed = 0.5;
+    let rotation_speed = 0.6;
+
+    // Rotación de la nave
     if window.is_key_down(Key::A) {
-        spaceship.rotate_left();
+        spaceship.rotate_left(rotation_speed);
     }
     if window.is_key_down(Key::D) {
-        spaceship.rotate_right();
+        spaceship.rotate_right(rotation_speed);
     }
 
+    // Rotación de la cámara
+    if window.is_key_down(Key::A) {
+        rotate_camera_around(&mut camera.eye, spaceship.position, rotation_speed);
+    }
+    if window.is_key_down(Key::D) {
+        rotate_camera_around(&mut camera.eye, spaceship.position, -rotation_speed);
+    }
 
-    camera.follow_spaceship(&spaceship);
+    // Movimiento de la nave
+    if window.is_key_down(Key::W) {
+        spaceship.move_forward(movement_speed);
+    }
+    if window.is_key_down(Key::S) {
+        spaceship.move_backward(movement_speed);
+    }
+
+    // Actualiza la cámara para que siempre apunte hacia la nave
+    update_camera(camera, spaceship);
+}
+
+
+// Rotación de la cámara alrededor de la nave
+fn rotate_camera_around(camera_position: &mut Vec3, center: Vec3, angle: f32) {
+    let relative_position = *camera_position - center;
+    let rotation_matrix = rotate_y(&Mat4::identity(), angle);
+    let rotated_position = rotation_matrix.transform_vector(&relative_position);
+    *camera_position = rotated_position + center;
+}
+
+
+fn update_camera(camera: &mut Camera, spaceship: &Spaceship) {
+    camera.center = spaceship.position; // La cámara siempre mira hacia la nave
 }
